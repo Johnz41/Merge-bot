@@ -1,101 +1,107 @@
 import os
-import shutil
 import asyncio
-import subprocess
 import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from config import API_ID, API_HASH, BOT_TOKEN
+from pyrogram.enums import ChatAction
+from aiofiles import open as aioopen
+import subprocess
+
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Client("merge-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-user_tasks = {}
+user_sessions = {}
 
-@app.on_message(filters.command("merge"))
-async def handle_merge_command(client, message: Message):
-    if not message.reply_to_message:
-        return await message.reply("Reply to the **first file** with:\n`/merge -i 2 -name movie.mkv`")
+def sizeof_fmt(num, suffix="B"):
+    for unit in ["", "K", "M", "G"]:
+        if abs(num) < 1024.0:
+            return f"{num:.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f} T{suffix}"
 
-    user_id = message.from_user.id
+@app.on_message(filters.private & filters.command("start"))
+async def start(_, message: Message):
+    await message.reply("Hi! Send me multiple .mkv files, then reply to the **first one** with:\n\n`/merge -i 3 -name movie.mkv`", quote=True)
 
-    # Parse command
-    match = re.search(r"-i\s*(\d+)\s*-name\s+(.+)", message.text)
+@app.on_message(filters.private & filters.command("merge"))
+async def handle_merge(_, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.video and not message.reply_to_message.document:
+        return await message.reply("⚠️ Please **reply to a video or file** to start merging.")
+
+    match = re.match(r"/merge\s+-i\s+(\d+)\s+-name\s+(.+)", message.text)
     if not match:
-        return await message.reply("Invalid format. Use:\n`/merge -i 2 -name movie.mkv`")
+        return await message.reply("❌ Invalid format.\nUse: `/merge -i 3 -name output.mkv`", quote=True)
 
     count = int(match.group(1))
-    name = match.group(2).strip()
-
-    user_tasks[user_id] = {
-        "expected": count,
-        "received": 0,
-        "paths": [],
-        "filename": name,
-        "dir": f"downloads/{user_id}"
-    }
-
-    os.makedirs(user_tasks[user_id]["dir"], exist_ok=True)
-
-    # Download first file (the one replied to)
-    media = message.reply_to_message.video or message.reply_to_message.document
-    if not media or media.file_size > 4 * 1024 * 1024 * 1024:
-        return await message.reply("First file is missing or too large (<4GB allowed).")
-
-    first_path = os.path.join(user_tasks[user_id]["dir"], media.file_name)
-    info = await message.reply(f"Downloading 1 of {count}...\nSize: {media.file_size // (1024 * 1024)} MB")
-    await client.download_media(message.reply_to_message, first_path)
-    await info.edit("Downloaded ✅")
-
-    user_tasks[user_id]["paths"].append(first_path)
-    user_tasks[user_id]["received"] += 1
-
-    await message.reply(f"Waiting for {count - 1} more files...")
-
-@app.on_message(filters.video | filters.document)
-async def handle_file_upload(client, message: Message):
+    filename = match.group(2).strip()
     user_id = message.from_user.id
-    task = user_tasks.get(user_id)
 
-    if not task or task["received"] >= task["expected"]:
-        return
+    await message.reply(f"🧩 Collecting {count} files...")
 
-    media = message.video or message.document
-    if not media or media.file_size > 4 * 1024 * 1024 * 1024:
-        return await message.reply("File too large or unsupported.")
+    # Collect file message_ids after the replied file
+    replied_id = message.reply_to_message.id
+    chat_id = message.chat.id
 
-    path = os.path.join(task["dir"], media.file_name)
-    index = task["received"] + 1
-    info = await message.reply(f"Downloading {index} of {task['expected']}...\nSize: {media.file_size // (1024 * 1024)} MB")
-    await client.download_media(message, path)
-    await info.edit("Downloaded ✅")
+    files = []
+    async for msg in app.get_chat_history(chat_id, offset_id=replied_id - 1, reverse=True):
+        if msg.from_user and msg.from_user.id == user_id:
+            if msg.document or msg.video:
+                files.append(msg)
+                if len(files) == count:
+                    break
 
-    task["paths"].append(path)
-    task["received"] += 1
+    if len(files) < count:
+        return await message.reply(f"❌ Only found {len(files)} files. Expected {count}.", quote=True)
 
-    if task["received"] == task["expected"]:
-        await message.reply("All files received. Merging...")
+    await message.reply("📥 Downloading files...")
 
-        list_path = os.path.join(task["dir"], "inputs.txt")
-        with open(list_path, "w") as f:
-            for file in sorted(task["paths"]):
-                f.write(f"file '{os.path.abspath(file)}'\n")
+    downloaded_files = []
+    for i, file_msg in enumerate(files, start=1):
+        media = file_msg.document or file_msg.video
+        path = f"{user_id}_{i}.mkv"
+        await message.reply_chat_action(ChatAction.UPLOAD_VIDEO)
+        d_msg = await message.reply(f"⬇️ Downloading file {i}/{count} ({sizeof_fmt(media.file_size)})...")
+        await app.download_media(media, file_name=path)
+        downloaded_files.append(path)
+        await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(media.file_size)})")
 
-        output_path = os.path.join(task["dir"], task["filename"])
-        merging_msg = await message.reply("Merging in progress...")
+    list_path = f"{user_id}_inputs.txt"
+    async with aioopen(list_path, "w") as f:
+        for path in downloaded_files:
+            await f.write(f"file '{os.path.abspath(path)}'\n")
 
-        cmd = ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path]
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await process.communicate()
+    await message.reply("🎬 Merging files, please wait...")
 
-        if os.path.exists(output_path):
-            file_size = os.path.getsize(output_path) // (1024 * 1024)
-            await merging_msg.edit(f"Merging done ✅\nUploading `{task['filename']}` ({file_size} MB)...")
-            await message.reply_document(output_path)
-        else:
-            await merging_msg.edit("Merging failed ❌")
+    output_path = os.path.abspath(f"{user_id}_{filename}")
+    cmd = [
+        "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path
+    ]
 
-        shutil.rmtree(task["dir"], ignore_errors=True)
-        user_tasks.pop(user_id, None)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        return await message.reply("❌ Failed to merge. Make sure files are valid .mkv and ffmpeg is working.")
+
+    size = os.path.getsize(output_path)
+    await message.reply(f"📤 Uploading `{filename}` ({sizeof_fmt(size)})...")
+
+    await app.send_document(chat_id, output_path, caption=f"🎉 Merged `{filename}` successfully!")
+
+    # Cleanup
+    for f in downloaded_files:
+        os.remove(f)
+    os.remove(list_path)
+    os.remove(output_path)
+
+@app.on_message(filters.private & (filters.video | filters.document))
+async def store_file(_, message: Message):
+    # Just acknowledge receipt; the real handler is /merge
+    await message.reply("✅ File received. Now reply to this file with `/merge -i X -name file.mkv`")
 
 app.run()
-        

@@ -1,4 +1,6 @@
 pyrofork==2.3.45
 tgcrypto
 pymongo
-aiofiles
+ffmpeg-python
+ffmpeg
+requests

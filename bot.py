@@ -1,19 +1,17 @@
 import os
 import asyncio
 import re
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ChatAction
 from aiofiles import open as aioopen
-import subprocess
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Client("merge-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-user_sessions = {}
 
 def sizeof_fmt(num, suffix="B"):
     for unit in ["", "K", "M", "G"]:
@@ -24,11 +22,11 @@ def sizeof_fmt(num, suffix="B"):
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(_, message: Message):
-    await message.reply("Hi! Send me multiple .mkv files, then reply to the **first one** with:\n\n`/merge -i 3 -name movie.mkv`", quote=True)
+    await message.reply("Hi! 👋 Send me multiple `.mkv` files, then reply to the **first** one with:\n\n`/merge -i 3 -name movie.mkv`")
 
 @app.on_message(filters.private & filters.command("merge"))
 async def handle_merge(_, message: Message):
-    if not message.reply_to_message or not message.reply_to_message.video and not message.reply_to_message.document:
+    if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
         return await message.reply("⚠️ Please **reply to a video or file** to start merging.")
 
     match = re.match(r"/merge\s+-i\s+(\d+)\s+-name\s+(.+)", message.text)
@@ -38,23 +36,26 @@ async def handle_merge(_, message: Message):
     count = int(match.group(1))
     filename = match.group(2).strip()
     user_id = message.from_user.id
-
-    await message.reply(f"🧩 Collecting {count} files...")
-
-    # Collect file message_ids after the replied file
-    replied_id = message.reply_to_message.id
     chat_id = message.chat.id
+    replied_id = message.reply_to_message.id
 
-    files = []
-    async for msg in app.get_chat_history(chat_id, offset_id=replied_id - 1, reverse=True):
-        if msg.from_user and msg.from_user.id == user_id:
+    await message.reply(f"🧩 Looking for {count} files from you...")
+
+    files = [message.reply_to_message]
+    msg_id = replied_id
+
+    while len(files) < count:
+        msg_id += 1
+        try:
+            msg = await app.get_messages(chat_id, msg_id)
+        except:
+            break
+        if msg and msg.from_user and msg.from_user.id == user_id:
             if msg.document or msg.video:
                 files.append(msg)
-                if len(files) == count:
-                    break
 
     if len(files) < count:
-        return await message.reply(f"❌ Only found {len(files)} files. Expected {count}.", quote=True)
+        return await message.reply(f"❌ Only found {len(files)} file(s). Expected {count}.", quote=True)
 
     await message.reply("📥 Downloading files...")
 
@@ -62,7 +63,6 @@ async def handle_merge(_, message: Message):
     for i, file_msg in enumerate(files, start=1):
         media = file_msg.document or file_msg.video
         path = f"{user_id}_{i}.mkv"
-        await message.reply_chat_action(ChatAction.UPLOAD_VIDEO)
         d_msg = await message.reply(f"⬇️ Downloading file {i}/{count} ({sizeof_fmt(media.file_size)})...")
         await app.download_media(media, file_name=path)
         downloaded_files.append(path)
@@ -86,7 +86,7 @@ async def handle_merge(_, message: Message):
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError:
-        return await message.reply("❌ Failed to merge. Make sure files are valid .mkv and ffmpeg is working.")
+        return await message.reply("❌ Merge failed. Make sure all files are valid `.mkv` format.")
 
     size = os.path.getsize(output_path)
     await message.reply(f"📤 Uploading `{filename}` ({sizeof_fmt(size)})...")
@@ -101,7 +101,7 @@ async def handle_merge(_, message: Message):
 
 @app.on_message(filters.private & (filters.video | filters.document))
 async def store_file(_, message: Message):
-    # Just acknowledge receipt; the real handler is /merge
-    await message.reply("✅ File received. Now reply to this file with `/merge -i X -name file.mkv`")
+    await message.reply("✅ File received. Now reply to this file with `/merge -i X -name movie.mkv`")
 
 app.run()
+    

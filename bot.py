@@ -1,4 +1,3 @@
-# bot.py
 import os
 import re
 import time
@@ -37,17 +36,16 @@ async def progress_bar(current, total, message: Message, prefix: str, start: flo
         last_progress[key] = now
         percent = current / total * 100
         done_blocks = int(percent // 10)
-        bar = "●" + "●" * done_blocks + "○" * (10 - done_blocks)
+        bar = "●" * done_blocks + "○" * (10 - done_blocks)
         speed = current / elapsed
         eta = (total - current) / speed if speed > 0 else 0
         text = (
             f"{prefix}: {filename}\n"
-            f"👨 Userid : {message.chat.id}\n"
+            f"👤 Userid: {message.chat.id}\n"
             f"{bar} {percent:.2f}%\n"
-            f"🔄️{current / (1024*1024):.2f}MB of {total / (1024*1024):.2f}MB\n"
-            f"📊Speed: {speed / (1024*1024):.2f}MB/s\n"
-            f"⏰Estimated: {int(eta)} seconds\n"
-            f"⏱️Elapsed: {int(elapsed)} seconds"
+            f"🔄 {current / (1024*1024):.2f}MB of {total / (1024*1024):.2f}MB\n"
+            f"📊 Speed: {speed / (1024*1024):.2f}MB/s\n"
+            f"⏰ ETA: {int(eta)}s | ⏱ Elapsed: {int(elapsed)}s"
         )
         try:
             await message.edit_text(text)
@@ -60,14 +58,20 @@ async def start(client, message):
 
 @app.on_message(filters.command("settings"))
 async def settings(client, message):
+    user_id = message.from_user.id
+    user_settings = settings_col.find_one({"_id": user_id}) or {}
+    thumb = user_settings.get("thumbnail") or "https://envs.sh/e3P.jpg"
+
     keyboard = [
         [InlineKeyboardButton("Merge", callback_data="merge_toggle")],
         [InlineKeyboardButton("Thumbnail", callback_data="thumbnail_prompt")],
         [InlineKeyboardButton("Metadata", callback_data="metadata_prompt")],
         [InlineKeyboardButton("Close", callback_data="close_menu")]
     ]
-    await message.reply(
-        f"⚙️ User Settings for {message.from_user.mention}",
+
+    await message.reply_photo(
+        photo=thumb,
+        caption=f"⚙️ User Settings for {message.from_user.mention}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -75,6 +79,7 @@ async def settings(client, message):
 async def callbacks(client, callback):
     data = callback.data
     user_id = callback.from_user.id
+    user_settings = settings_col.find_one({"_id": user_id}) or {}
 
     if data == "merge_toggle":
         keyboard = [
@@ -91,14 +96,13 @@ async def callbacks(client, callback):
         )
 
     elif data == "thumbnail_prompt":
-        await callback.message.edit_text("🖼️ Send me a thumbnail image within 60 seconds.",
+        await callback.message.edit_text("🖼️ Send a thumbnail image within 60 seconds.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_to_settings")]]))
         try:
             msg = await app.listen(callback.message.chat.id, timeout=60)
             if msg.photo:
-                thumb_path = os.path.join(DOWNLOADS_DIR, f"{user_id}_thumb.jpg")
-                await msg.download(thumb_path)
-                settings_col.update_one({"_id": user_id}, {"$set": {"thumbnail": thumb_path}}, upsert=True)
+                file_id = msg.photo.file_id
+                settings_col.update_one({"_id": user_id}, {"$set": {"thumbnail": file_id}}, upsert=True)
                 await msg.reply("✅ Thumbnail saved.")
             else:
                 await msg.reply("❌ No valid image received.")
@@ -119,14 +123,16 @@ async def callbacks(client, callback):
             await callback.message.reply("❌ Timeout: No response received.")
 
     elif data == "back_to_settings":
+        thumb = user_settings.get("thumbnail") or "https://envs.sh/e3P.jpg"
         keyboard = [
             [InlineKeyboardButton("Merge", callback_data="merge_toggle")],
             [InlineKeyboardButton("Thumbnail", callback_data="thumbnail_prompt")],
             [InlineKeyboardButton("Metadata", callback_data="metadata_prompt")],
             [InlineKeyboardButton("Close", callback_data="close_menu")]
         ]
-        await callback.message.edit_text(
-            f"⚙️ User Settings for {callback.from_user.mention}",
+        await callback.message.edit_media(
+            media=thumb,
+            caption=f"⚙️ User Settings for {callback.from_user.mention}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -217,4 +223,4 @@ async def merge_command(client, message: Message):
 
 if __name__ == "__main__":
     app.run()
-                
+                       

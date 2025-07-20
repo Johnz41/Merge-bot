@@ -32,12 +32,9 @@ async def show_progress(current, total, message: Message, prefix):
     mb_current = current / (1024 * 1024)
     mb_total = total / (1024 * 1024)
     percent = (current / total) * 100
-    try:
-        await message.edit_text(f"{prefix} {mb_current:.2f} MB / {mb_total:.2f} MB ({percent:.1f}%)")
-    except:
-        pass
+    await message.edit_text(f"{prefix} {mb_current:.2f} MB / {mb_total:.2f} MB ({percent:.1f}%)")
 
-# Merge command
+# Command handler
 @app.on_message(filters.command("merge") & filters.reply)
 async def handle_merge(client: Client, message: Message):
     try:
@@ -58,7 +55,7 @@ async def handle_merge(client: Client, message: Message):
         downloaded_files = []
         current_msg_id = replied_id
 
-        status = await message.reply(f"📥 Starting download of {count} files...", quote=True)
+        await message.reply(f"📥 Starting download of {count} files...", quote=True)
 
         for i in range(count):
             msg = await client.get_messages(chat_id, current_msg_id + i)
@@ -71,19 +68,22 @@ async def handle_merge(client: Client, message: Message):
             else:
                 return await message.reply("❌ Expected .mkv files only.", quote=True)
 
-        # Create FFmpeg concat file
+        # Create input file list for FFmpeg
         input_txt = os.path.join(DOWNLOADS_DIR, f"{chat_id}_inputs.txt")
         async with aiofiles.open(input_txt, "w") as f:
             for path in downloaded_files:
                 await f.write(f"file '{os.path.abspath(path)}'\n")
 
         output_file = os.path.join(DOWNLOADS_DIR, output_name)
-        merging_msg = await message.reply("⚙️ Merging files (no re-encode)...", quote=True)
+        merging_msg = await message.reply("⚙️ Merging files...", quote=True)
 
-        # FFmpeg stream copy (no re-encoding)
+        # FFmpeg command with re-encoding to fix black screen & size issues
         ffmpeg_cmd = [
             "ffmpeg", "-f", "concat", "-safe", "0", "-i", input_txt,
-            "-c", "copy", "-y", output_file
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-y", output_file
         ]
 
         process = await asyncio.create_subprocess_exec(
@@ -92,7 +92,7 @@ async def handle_merge(client: Client, message: Message):
         _, stderr = await process.communicate()
 
         if not os.path.exists(output_file):
-            await merging_msg.edit_text("❌ Merging failed.\n" + stderr.decode())
+            await merging_msg.edit_text("❌ Merging failed.")
             return
 
         size_mb = os.path.getsize(output_file) / (1024 * 1024)
@@ -104,6 +104,7 @@ async def handle_merge(client: Client, message: Message):
         await merging_msg.edit_text(f"📤 Uploading {output_name} ({size_mb:.2f} MB)...")
         sent = await message.reply_document(output_file, caption=f"`{output_name}`", quote=True)
 
+        # MongoDB log
         db.insert_one({
             "user_id": message.from_user.id,
             "file_name": output_name,
@@ -116,11 +117,11 @@ async def handle_merge(client: Client, message: Message):
             os.remove(f)
 
     except Exception as e:
-        logger.exception("Merge Error")
+        logger.exception("Error during merge")
         await message.reply(f"❌ Error: {e}", quote=True)
 
 # Start bot
 if __name__ == "__main__":
     print("Bot started.")
     app.run()
-        
+    

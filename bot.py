@@ -75,15 +75,17 @@ async def handle_merge(_, message: Message):
     downloaded_files = []
 
     await message.reply("📥 Fetching files...")
+    history = await app.get_chat_history(chat_id, limit=100)
     files = []
-
-    # Gather files (message replied + previous n-1)
-    async for msg in app.iter_history(chat_id, offset_id=replied_id - 1):
+    
+    for msg in history.messages:
+        if msg.id >= replied_id:
+            continue
         if msg.video or msg.document:
             files.append(msg)
-            if len(files) == count - 1:
-                break
-
+        if len(files) == count - 1:
+            break
+    
     files.reverse()
     files.insert(0, message.reply_to_message)
 

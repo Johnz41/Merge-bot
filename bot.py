@@ -8,6 +8,7 @@ from pymongo import MongoClient
 from datetime import datetime
 import subprocess
 
+# ENV variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -15,10 +16,12 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 app = Client("merge-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["merge_bot_db"]
 logs_collection = db["merge_logs"]
 
+# Size formatter
 def sizeof_fmt(num, suffix="B"):
     for unit in ["", "K", "M", "G"]:
         if abs(num) < 1024:
@@ -26,6 +29,7 @@ def sizeof_fmt(num, suffix="B"):
         num /= 1024
     return f"{num:.1f} T{suffix}"
 
+# Progress bar
 async def progress(current, total, message: Message, msg, prefix="⬇️ Downloading"):
     percent = (current / total) * 100
     bar = "█" * int(percent // 10) + "░" * (10 - int(percent // 10))
@@ -77,17 +81,20 @@ async def handle_merge(_, message: Message):
 
     await message.reply("📥 Fetching files...")
 
+    # ✅ Replace unsupported get_chat_history with get_messages by ID
     files = []
-    async for msg in app.get_chat_history(chat_id, limit=100):
-        if msg.id >= replied_id:
-            continue
-        if msg.video or msg.document:
+    current_id = replied_id - 1
+    while len(files) < count - 1 and current_id > 0:
+        msg = await app.get_messages(chat_id, current_id)
+        if msg and (msg.video or msg.document):
             files.append(msg)
-        if len(files) == count - 1:
-            break
+        current_id -= 1
 
     files.reverse()
     files.insert(0, message.reply_to_message)
+
+    if len(files) != count:
+        return await message.reply(f"⚠️ Only found {len(files)} messages. Please recheck your count.")
 
     # Download files
     for i, msg in enumerate(files, start=1):
@@ -167,3 +174,4 @@ async def handle_merge(_, message: Message):
 if __name__ == "__main__":
     print("✅ Bot is running...")
     app.run()
+    

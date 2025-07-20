@@ -194,3 +194,6 @@ async def merge_command(client, message: Message):
     except Exception as e:
         logger.exception("Merge error")
         await message.reply(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    app.run()

@@ -60,18 +60,26 @@ async def handle_merge(_, message: Message):
     await message.reply("📥 Downloading files...")
 
     downloaded_files = []
+
     for i, file_msg in enumerate(files, start=1):
         media = file_msg.document or file_msg.video
-        path = f"{user_id}_{i}.mkv"
+        original_name = media.file_name or f"{user_id}_{i}.mkv"
+        ext = os.path.splitext(original_name)[1]
+        if not ext:
+            ext = ".mkv"
+        path = f"{user_id}_{i}{ext}"
+        
         d_msg = await message.reply(f"⬇️ Downloading file {i}/{count} ({sizeof_fmt(media.file_size)})...")
+
         try:
             await app.download_media(media, file_name=path)
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Download completed but {path} not found.")
         except Exception as e:
-            return await message.reply(f"❌ Failed to download file {i}.\nError: `{e}`")
-        if not os.path.exists(path):
-            return await message.reply(f"❌ File not found after download: {path}")
+            return await message.reply(f"❌ Failed to download file {i}.\n\n`{str(e)}`")
+
         downloaded_files.append(path)
-        await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(media.file_size)})")
+        await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(os.path.getsize(path))})")
 
     list_path = f"{user_id}_inputs.txt"
     async with aioopen(list_path, "w") as f:
@@ -115,3 +123,4 @@ async def store_file(_, message: Message):
     await message.reply("✅ File received. Now reply to this file with `/merge -i X -name movie.mkv`")
 
 app.run()
+    

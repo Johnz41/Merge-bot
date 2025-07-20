@@ -1,226 +1,165 @@
 import os
-import re
-import time
 import asyncio
-import aiofiles
 import logging
-import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient
-from datetime import datetime
+from motor.motor_asyncio import AsyncIOMotorClient
 
+# Load from environment
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DB_URI = os.environ.get("MONGO_URI")
 
+# Constants
+DEFAULT_THUMB = "https://envs.sh/e3P.jpg"
+DEFAULT_META = "HC_Filez"
+DOWNLOAD_DIR = "downloads"
+
+# Logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-mongo = MongoClient(MONGO_URI)
-db = mongo["MergeDB"]
-settings_col = db["UserSettings"]
-logs_col = db["FileLogs"]
+# Mongo
+mongo_client = AsyncIOMotorClient(MONGO_DB_URI)
+db = mongo_client.MergeBot
+settings_col = db.user_settings
+pending_col = db.pending_files
 
-app = Client("merge-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-DOWNLOADS_DIR = "downloads"
-os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-last_progress = {}
+# Bot init
+app = Client("MergeBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-async def progress_bar(current, total, message: Message, prefix: str, start: float, filename: str):
-    now = time.time()
-    elapsed = now - start
-    key = message.chat.id
-    if key not in last_progress or now - last_progress[key] > 3:
-        last_progress[key] = now
-        percent = current / total * 100
-        done_blocks = int(percent // 10)
-        bar = "●" * done_blocks + "○" * (10 - done_blocks)
-        speed = current / elapsed
-        eta = (total - current) / speed if speed > 0 else 0
-        text = (
-            f"{prefix}: {filename}\n"
-            f"👤 Userid: {message.chat.id}\n"
-            f"{bar} {percent:.2f}%\n"
-            f"🔄 {current / (1024*1024):.2f}MB of {total / (1024*1024):.2f}MB\n"
-            f"📊 Speed: {speed / (1024*1024):.2f}MB/s\n"
-            f"⏰ ETA: {int(eta)}s | ⏱ Elapsed: {int(elapsed)}s"
-        )
-        try:
-            await message.edit_text(text)
-        except:
-            pass
+# Utilities
+async def get_user_settings(user_id):
+    settings = await settings_col.find_one({"_id": user_id})
+    if not settings:
+        return {"thumbnail": DEFAULT_THUMB, "metadata": DEFAULT_META}
+    return {
+        "thumbnail": settings.get("thumbnail", DEFAULT_THUMB),
+        "metadata": settings.get("metadata", DEFAULT_META)
+    }
 
+# Start
 @app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply("Hi, I am a merge bot that can merge files for you.\nUse /settings to configure merge options.")
-
-@app.on_message(filters.command("settings"))
-async def settings(client, message):
-    user_id = message.from_user.id
-    user_settings = settings_col.find_one({"_id": user_id}) or {}
-    thumb = user_settings.get("thumbnail") or "https://envs.sh/e3P.jpg"
-
-    keyboard = [
-        [InlineKeyboardButton("Merge", callback_data="merge_toggle")],
-        [InlineKeyboardButton("Thumbnail", callback_data="thumbnail_prompt")],
-        [InlineKeyboardButton("Metadata", callback_data="metadata_prompt")],
-        [InlineKeyboardButton("Close", callback_data="close_menu")]
-    ]
-
-    await message.reply_photo(
-        photo=thumb,
-        caption=f"⚙️ User Settings for {message.from_user.mention}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+async def start(_, message: Message):
+    await message.reply_text(
+        "👋 Welcome! Send me at least 2 videos and I’ll merge them.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
+        ])
     )
 
-@app.on_callback_query()
-async def callbacks(client, callback):
-    data = callback.data
-    user_id = callback.from_user.id
-    user_settings = settings_col.find_one({"_id": user_id}) or {}
+# Settings Menu
+@app.on_callback_query(filters.regex("settings"))
+async def settings_menu(_, query):
+    user_id = query.from_user.id
+    settings = await get_user_settings(user_id)
+    thumb = settings["thumbnail"]
+    meta = settings["metadata"]
 
-    if data == "merge_toggle":
-        keyboard = [
-            [InlineKeyboardButton("ON", callback_data="merge_on"), InlineKeyboardButton("OFF", callback_data="merge_off")],
-            [InlineKeyboardButton("Back", callback_data="back_to_settings")]
-        ]
-        await callback.message.edit_text("🔀 Toggle merging:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.message.edit(
+        f"<b>⚙️ Settings</b>\n\n📷 <b>Thumbnail:</b> <code>{thumb}</code>\n✍️ <b>Metadata:</b> <code>{meta}</code>",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Set Thumbnail", callback_data="set_thumb"),
+                InlineKeyboardButton("Set Metadata", callback_data="set_meta")
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="back"),
+                InlineKeyboardButton("❌ Close", callback_data="close")
+            ]
+        ]),
+        parse_mode="html"
+    )
 
-    elif data in ("merge_on", "merge_off"):
-        settings_col.update_one({"_id": user_id}, {"$set": {"merge_enabled": data == "merge_on"}}, upsert=True)
-        await callback.message.edit_text(
-            f"Merging is now {'enabled' if data == 'merge_on' else 'disabled'}.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_to_settings")]])
+# Set metadata
+@app.on_callback_query(filters.regex("set_meta"))
+async def ask_metadata(_, query):
+    await query.message.edit("✍️ Send me the text you want as your metadata.")
+    app.set_state(query.from_user.id, "set_meta")
+
+@app.on_message(filters.private & filters.text)
+async def set_meta_text(_, message):
+    if await app.get_state(message.from_user.id) == "set_meta":
+        await settings_col.update_one({"_id": message.from_user.id}, {"$set": {"metadata": message.text}}, upsert=True)
+        await message.reply("✅ Metadata saved!")
+        await app.set_state(message.from_user.id, None)
+
+# Set thumbnail
+@app.on_callback_query(filters.regex("set_thumb"))
+async def ask_thumb(_, query):
+    await query.message.edit("📤 Send a photo to set as thumbnail.")
+    app.set_state(query.from_user.id, "set_thumb")
+
+@app.on_message(filters.private & filters.photo)
+async def save_thumb(_, message):
+    if await app.get_state(message.from_user.id) == "set_thumb":
+        path = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_thumb.jpg")
+        await message.download(file_name=path)
+        await settings_col.update_one({"_id": message.from_user.id}, {"$set": {"thumbnail": path}}, upsert=True)
+        await message.reply("✅ Thumbnail saved!")
+        await app.set_state(message.from_user.id, None)
+
+# Close and back buttons
+@app.on_callback_query(filters.regex("close"))
+async def close_cb(_, query):
+    await query.message.delete()
+
+@app.on_callback_query(filters.regex("back"))
+async def back_cb(_, query):
+    await start(_, query.message)
+
+# Receive videos
+@app.on_message(filters.private & filters.video)
+async def collect_videos(_, message):
+    user_id = message.from_user.id
+    file_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_{message.video.file_unique_id}.mp4")
+    await message.download(file_path)
+    await pending_col.update_one({"_id": user_id}, {"$push": {"files": file_path}}, upsert=True)
+
+    data = await pending_col.find_one({"_id": user_id})
+    files = data.get("files", [])
+
+    if len(files) >= 2:
+        await message.reply("🔁 Merging your videos, please wait...")
+        merged_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_merged.mp4")
+        await merge_files(files, merged_path, user_id)
+
+        settings = await get_user_settings(user_id)
+        await app.send_video(
+            chat_id=message.chat.id,
+            video=merged_path,
+            caption=f"🎬 Merged by <b>{settings['metadata']}</b>",
+            thumb=settings["thumbnail"] if os.path.exists(settings["thumbnail"]) else DEFAULT_THUMB,
+            parse_mode="html",
+            supports_streaming=True
         )
 
-    elif data == "thumbnail_prompt":
-        await callback.message.edit_text("🖼️ Send a thumbnail image within 60 seconds.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_to_settings")]]))
-        try:
-            msg = await app.listen(callback.message.chat.id, timeout=60)
-            if msg.photo:
-                file_id = msg.photo.file_id
-                settings_col.update_one({"_id": user_id}, {"$set": {"thumbnail": file_id}}, upsert=True)
-                await msg.reply("✅ Thumbnail saved.")
-            else:
-                await msg.reply("❌ No valid image received.")
-        except asyncio.TimeoutError:
-            await callback.message.reply("❌ Timeout: No response received.")
+        await pending_col.delete_one({"_id": user_id})
+        for f in files:
+            if os.path.exists(f):
+                os.remove(f)
+        if os.path.exists(merged_path):
+            os.remove(merged_path)
+    else:
+        await message.reply("✅ Video saved. Send one more to merge.")
 
-    elif data == "metadata_prompt":
-        await callback.message.edit_text("📝 Send metadata text (e.g., `Exclusive By: @hc_filez`) within 60 seconds.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_to_settings")]]))
-        try:
-            msg = await app.listen(callback.message.chat.id, timeout=60)
-            if msg.text:
-                settings_col.update_one({"_id": user_id}, {"$set": {"metadata": msg.text}}, upsert=True)
-                await msg.reply("✅ Metadata saved.")
-            else:
-                await msg.reply("❌ No valid text received.")
-        except asyncio.TimeoutError:
-            await callback.message.reply("❌ Timeout: No response received.")
+# Merge using ffmpeg
+async def merge_files(file_list, output_path, user_id):
+    list_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_inputs.txt")
+    with open(list_path, "w") as f:
+        for file in file_list:
+            f.write(f"file '{file}'\n")
 
-    elif data == "back_to_settings":
-        thumb = user_settings.get("thumbnail") or "https://envs.sh/e3P.jpg"
-        keyboard = [
-            [InlineKeyboardButton("Merge", callback_data="merge_toggle")],
-            [InlineKeyboardButton("Thumbnail", callback_data="thumbnail_prompt")],
-            [InlineKeyboardButton("Metadata", callback_data="metadata_prompt")],
-            [InlineKeyboardButton("Close", callback_data="close_menu")]
-        ]
-        await callback.message.edit_media(
-            media=thumb,
-            caption=f"⚙️ User Settings for {callback.from_user.mention}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    cmd = [
+        "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
+        "-c", "copy", output_path
+    ]
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    await process.communicate()
+    os.remove(list_path)
 
-    elif data == "close_menu":
-        await callback.message.delete()
-
-@app.on_message(filters.command("merge") & filters.reply)
-async def merge_command(client, message: Message):
-    try:
-        match = re.match(r"/merge\s+-i\s*(\d+)\s+-name\s+(.+)", message.text)
-        if not match:
-            return await message.reply("❌ Usage: `/merge -i 2 -name movie.mkv`")
-
-        count = int(match.group(1))
-        output_name = match.group(2).strip()
-        chat_id = message.chat.id
-        user_id = message.from_user.id
-        replied_id = message.reply_to_message.id
-
-        if not output_name.endswith(".mkv"):
-            return await message.reply("❌ Output filename must end with `.mkv`")
-
-        downloaded = []
-        for i in range(count):
-            msg = await client.get_messages(chat_id, replied_id + i)
-            if msg.document:
-                filename = msg.document.file_name
-                path = os.path.join(DOWNLOADS_DIR, f"{user_id}_{i}.mkv")
-                status = await message.reply(f"⬇️ Downloading {filename}")
-                start_time = time.time()
-                await msg.download(path, progress=progress_bar, progress_args=(status, "Downloading", start_time, filename))
-                await status.edit_text(f"✅ Downloaded {filename}")
-                downloaded.append(path)
-
-        list_file = os.path.join(DOWNLOADS_DIR, f"{user_id}_inputs.txt")
-        async with aiofiles.open(list_file, "w") as f:
-            for path in downloaded:
-                await f.write(f"file '{os.path.abspath(path)}'\n")
-
-        out_file = os.path.join(DOWNLOADS_DIR, output_name)
-        status = await message.reply("⚙️ Merging files...")
-        start_time = time.time()
-
-        user_settings = settings_col.find_one({"_id": user_id}) or {}
-        meta_text = user_settings.get("metadata") or "HC_Filez"
-        meta_args = ["-metadata", f"author={meta_text}"]
-        thumb = user_settings.get("thumbnail") or "https://envs.sh/e3P.jpg"
-
-        ffmpeg_cmd = [
-            "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_file,
-            "-c", "copy", *meta_args, "-y", out_file
-        ]
-
-        process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        while True:
-            line = await process.stderr.readline()
-            if not line:
-                break
-            try:
-                text = line.decode()
-                match = re.search(r"time=(\d+:\d+:\d+\.\d+)", text)
-                if match:
-                    await progress_bar(1, 100, status, "Merging", start_time, output_name)
-            except:
-                pass
-
-        await process.wait()
-
-        if not os.path.exists(out_file):
-            return await status.edit_text("❌ Merging failed.")
-
-        size_mb = os.path.getsize(out_file) / (1024 * 1024)
-        if size_mb > 3990:
-            await status.edit_text("❌ File exceeds Telegram limit.")
-            return
-
-        await status.edit_text("📤 Uploading...")
-        await message.reply_document(out_file, caption=f"`{output_name}`", thumb=thumb)
-
-        logs_col.insert_one({"user_id": user_id, "file_name": output_name, "size": size_mb, "time": datetime.utcnow()})
-
-        for f in downloaded + [out_file, list_file]:
-            os.remove(f)
-
-    except Exception as e:
-        logger.exception("Merge error")
-        await message.reply(f"❌ Error: {e}")
-
+# Run
 if __name__ == "__main__":
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     app.run()
-                       
+    

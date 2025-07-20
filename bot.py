@@ -67,19 +67,22 @@ async def handle_merge(_, message: Message):
         ext = os.path.splitext(original_name)[1]
         if not ext:
             ext = ".mkv"
-        path = f"{user_id}_{i}{ext}"
+        tmp_name = f"{user_id}_{i}{ext}"
         
         d_msg = await message.reply(f"⬇️ Downloading file {i}/{count} ({sizeof_fmt(media.file_size)})...")
 
         try:
-            await app.download_media(media, file_name=path)
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Download completed but {path} not found.")
-        except Exception as e:
-            return await message.reply(f"❌ Failed to download file {i}.\n\n`{str(e)}`")
+            # Let Pyrogram pick filename, then rename
+            downloaded_path = await app.download_media(media)
+            os.rename(downloaded_path, tmp_name)
 
-        downloaded_files.append(path)
-        await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(os.path.getsize(path))})")
+            if not os.path.exists(tmp_name):
+                raise FileNotFoundError(f"Renamed file not found: {tmp_name}")
+        except Exception as e:
+            return await message.reply(f"❌ Failed to download or rename file {i}.\n\n`{str(e)}`")
+
+        downloaded_files.append(tmp_name)
+        await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(os.path.getsize(tmp_name))})")
 
     list_path = f"{user_id}_inputs.txt"
     async with aioopen(list_path, "w") as f:

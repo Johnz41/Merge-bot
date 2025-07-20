@@ -64,14 +64,22 @@ async def handle_merge(_, message: Message):
         media = file_msg.document or file_msg.video
         path = f"{user_id}_{i}.mkv"
         d_msg = await message.reply(f"⬇️ Downloading file {i}/{count} ({sizeof_fmt(media.file_size)})...")
-        await app.download_media(media, file_name=path)
+        try:
+            await app.download_media(media, file_name=path)
+        except Exception as e:
+            return await message.reply(f"❌ Failed to download file {i}.\nError: `{e}`")
+        if not os.path.exists(path):
+            return await message.reply(f"❌ File not found after download: {path}")
         downloaded_files.append(path)
         await d_msg.edit(f"✅ Downloaded file {i} ({sizeof_fmt(media.file_size)})")
 
     list_path = f"{user_id}_inputs.txt"
     async with aioopen(list_path, "w") as f:
         for path in downloaded_files:
-            await f.write(f"file '{os.path.abspath(path)}'\n")
+            abs_path = os.path.abspath(path)
+            if not os.path.exists(abs_path):
+                return await message.reply(f"❌ File missing before merge: {abs_path}")
+            await f.write(f"file '{abs_path}'\n")
 
     await message.reply("🎬 Merging files, please wait...")
 
@@ -85,8 +93,11 @@ async def handle_merge(_, message: Message):
 
     try:
         subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        return await message.reply("❌ Merge failed. Make sure all files are valid `.mkv` format.")
+    except subprocess.CalledProcessError as e:
+        return await message.reply(f"❌ Merge failed. Check if all files are valid `.mkv`\n\nError:\n`{e}`")
+
+    if not os.path.exists(output_path):
+        return await message.reply("❌ Merged file not found. Something went wrong.")
 
     size = os.path.getsize(output_path)
     await message.reply(f"📤 Uploading `{filename}` ({sizeof_fmt(size)})...")
@@ -104,4 +115,3 @@ async def store_file(_, message: Message):
     await message.reply("✅ File received. Now reply to this file with `/merge -i X -name movie.mkv`")
 
 app.run()
-    

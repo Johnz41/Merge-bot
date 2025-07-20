@@ -88,11 +88,6 @@ async def handle_merge(client: Client, message: Message):
             else:
                 return await message.reply("❌ Expected .mkv files only.", quote=True)
 
-        # Check for mixed codecs
-        if len(codecs_used) > 1:
-            await message.reply("⚠️ Files use different video codecs (e.g., x264, x265). Please use same codec for all.", quote=True)
-            return
-
         input_txt = os.path.join(DOWNLOADS_DIR, f"{chat_id}_inputs.txt")
         async with aiofiles.open(input_txt, "w") as f:
             for path in downloaded_files:
@@ -103,7 +98,7 @@ async def handle_merge(client: Client, message: Message):
 
         ffmpeg_cmd = [
             "ffmpeg", "-f", "concat", "-safe", "0", "-i", input_txt,
-            "-c", "copy",  # no re-encoding for fast, size-preserving merge
+            "-c:v", "libx265", "-crf", "28", "-preset", "veryfast",
             "-y", output_file
         ]
 
@@ -158,4 +153,4 @@ async def handle_merge(client: Client, message: Message):
 if __name__ == "__main__":
     print("Bot started.")
     app.run()
-        
+    

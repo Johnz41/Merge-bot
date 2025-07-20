@@ -6,7 +6,6 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 from datetime import datetime
-from functools import partial
 import subprocess
 
 API_ID = int(os.getenv("API_ID"))
@@ -20,7 +19,6 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["merge_bot_db"]
 logs_collection = db["merge_logs"]
 
-# Human readable size
 def sizeof_fmt(num, suffix="B"):
     for unit in ["", "K", "M", "G"]:
         if abs(num) < 1024:
@@ -28,7 +26,6 @@ def sizeof_fmt(num, suffix="B"):
         num /= 1024
     return f"{num:.1f} T{suffix}"
 
-# Progress bar
 async def progress(current, total, message: Message, msg, prefix="⬇️ Downloading"):
     percent = (current / total) * 100
     bar = "█" * int(percent // 10) + "░" * (10 - int(percent // 10))
@@ -40,7 +37,11 @@ async def progress(current, total, message: Message, msg, prefix="⬇️ Downloa
 
 @app.on_message(filters.private & filters.command("start"))
 async def start_cmd(_, message: Message):
-    await message.reply("👋 Send me multiple MKV files, then reply to the first one with:\n\n`/merge -i <count> -name <output>.mkv`")
+    await message.reply(
+        "👋 Send me multiple MKV files, then reply to the **first one** with:\n\n"
+        "`/merge -i <count> -name output.mkv`\n\n"
+        "Example: `/merge -i 3 -name movie.mkv`"
+    )
 
 @app.on_message(filters.private & filters.command("recent"))
 async def recent_merges(_, message: Message):
@@ -61,7 +62,7 @@ async def recent_merges(_, message: Message):
 @app.on_message(filters.private & filters.regex(r"^/merge"))
 async def handle_merge(_, message: Message):
     if not message.reply_to_message:
-        return await message.reply("❗️Reply to the first MKV file.")
+        return await message.reply("❗️Reply to the **first MKV file** you sent.")
 
     match = re.match(r"/merge\s+-i\s+(\d+)\s+-name\s+(.+\.mkv)", message.text)
     if not match:
@@ -75,21 +76,20 @@ async def handle_merge(_, message: Message):
     downloaded_files = []
 
     await message.reply("📥 Fetching files...")
-    history = await app.get_chat_history(chat_id, limit=100)
+
     files = []
-    
-    for msg in history.messages:
+    async for msg in app.get_chat_history(chat_id, limit=100):
         if msg.id >= replied_id:
             continue
         if msg.video or msg.document:
             files.append(msg)
         if len(files) == count - 1:
             break
-    
+
     files.reverse()
     files.insert(0, message.reply_to_message)
 
-    # Downloading
+    # Download files
     for i, msg in enumerate(files, start=1):
         media = msg.document or msg.video
         d_msg = await message.reply(f"⬇️ Downloading file {i}/{count}...")
@@ -102,15 +102,15 @@ async def handle_merge(_, message: Message):
         await d_msg.edit(f"✅ Downloaded: {os.path.basename(downloaded_path)}")
         downloaded_files.append(downloaded_path)
 
-    # Prepare concat list file
+    # Create concat list
     list_path = f"{user_id}_inputs.txt"
     async with aiofiles.open(list_path, mode="w") as f:
         for path in downloaded_files:
             await f.write(f"file '{path}'\n")
 
-    # Merge using ffmpeg
+    # Merge with ffmpeg
     output_path = f"{user_id}_merged.mkv"
-    m_msg = await message.reply("🔄 Starting merge...")
+    m_msg = await message.reply("🔄 Merging files...")
 
     cmd = [
         "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_path,
@@ -124,25 +124,23 @@ async def handle_merge(_, message: Message):
         stderr=subprocess.PIPE
     )
 
-    # Show raw ffmpeg progress
     while True:
         line = await process.stderr.readline()
         if not line:
             break
         decoded = line.decode().strip()
         if "time=" in decoded:
-            await m_msg.edit(f"🔄 Merging...\n`{decoded}`")
+            await m_msg.edit(f"🛠 Merging...\n`{decoded}`")
 
     await process.wait()
 
-    # Upload result
+    # Upload
     if os.path.exists(output_path):
         size = os.path.getsize(output_path)
         u_msg = await message.reply(f"📤 Uploading {filename} ({sizeof_fmt(size)})...")
         await app.send_document(chat_id, document=output_path, file_name=filename)
-        await u_msg.edit("✅ Done!")
+        await u_msg.edit("✅ Upload complete!")
 
-        # Save to MongoDB
         logs_collection.insert_one({
             "user_id": user_id,
             "username": message.from_user.username,
@@ -155,9 +153,9 @@ async def handle_merge(_, message: Message):
         })
 
     else:
-        await message.reply("❌ Merging failed.")
+        await message.reply("❌ Merging failed. Output file not found.")
 
-    # Clean up
+    # Cleanup
     try:
         os.remove(list_path)
         os.remove(output_path)
@@ -167,5 +165,5 @@ async def handle_merge(_, message: Message):
         pass
 
 if __name__ == "__main__":
-    print("🚀 Bot started.")
+    print("✅ Bot is running...")
     app.run()

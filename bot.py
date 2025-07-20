@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import asyncio
 import aiofiles
 import logging
@@ -27,12 +28,23 @@ app = Client("merge-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 DOWNLOADS_DIR = "downloads"
 
+# Throttled progress state
+last_edit_time = {}
+
 # Helper: show progress
 async def show_progress(current, total, message: Message, prefix):
-    mb_current = current / (1024 * 1024)
-    mb_total = total / (1024 * 1024)
-    percent = (current / total) * 100
-    await message.edit_text(f"{prefix} {mb_current:.2f} MB / {mb_total:.2f} MB ({percent:.1f}%)")
+    now = time.time()
+    key = message.chat.id
+
+    if key not in last_edit_time or now - last_edit_time[key] > 3:
+        last_edit_time[key] = now
+        mb_current = current / (1024 * 1024)
+        mb_total = total / (1024 * 1024)
+        percent = (current / total) * 100
+        try:
+            await message.edit_text(f"{prefix} {mb_current:.2f} MB / {mb_total:.2f} MB ({percent:.1f}%)")
+        except Exception:
+            pass
 
 # Command handler
 @app.on_message(filters.command("merge") & filters.reply)
@@ -77,12 +89,10 @@ async def handle_merge(client: Client, message: Message):
         output_file = os.path.join(DOWNLOADS_DIR, output_name)
         merging_msg = await message.reply("⚙️ Merging files...", quote=True)
 
-        # FFmpeg command with re-encoding to fix black screen & size issues
         ffmpeg_cmd = [
             "ffmpeg", "-f", "concat", "-safe", "0", "-i", input_txt,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
-            "-pix_fmt", "yuv420p",
             "-y", output_file
         ]
 
